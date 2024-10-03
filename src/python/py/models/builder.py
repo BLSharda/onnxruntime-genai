@@ -636,8 +636,10 @@ class Model:
         self.make_value_info(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
+        print("Matmul attr = ", matmul)
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
+            print("Making lora matmul")
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
         # elif self.matmul_attrs["use_qdq"]:
         #     return self.make_matmul_qdq(matmul, basename, root_input, **kwargs)
@@ -654,7 +656,9 @@ class Model:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
-        weight = name[1:].replace("/", ".") + ".weight"
+        end_position = name.rfind('/')
+        sliced_name = name[:end_position]
+        weight = sliced_name[1:].replace("/", ".") + ".weight"
         self.make_external_tensor(matmul.weight.detach().numpy().transpose().astype(self.to_numpy_dtype[self.io_dtype]), weight)
 
         last_dim = matmul.weight.shape[0]
@@ -1118,7 +1122,7 @@ class Model:
         #                Transpose
         #                    |
         #                 Reshape
-        basename = f"/model/layers.{layer_id}/attn/{'k_proj' if past_kv.endswith('key') else 'v_proj'}/repeat_kv"
+        basename = f"/model/layers.{layer_id}/self_attn/{'k_proj' if past_kv.endswith('key') else 'v_proj'}/repeat_kv"
 
         # Make the initial subgraph
         #
@@ -1321,17 +1325,17 @@ class Model:
         # Make MatMul nodes
         if self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
-            qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+            qkv_matmul_basename = f"/model/layers.{layer_id}/self_attn/qkv_proj/MatMul"
             qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
             self.attention_attrs["q_path"] = f"{qkv_matmul_name}/output_0"
         else:
-            q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
+            q_matmul_basename = f"/model/layers.{layer_id}/self_attn/q_proj/MatMul"
             q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
             self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
-            k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
+            k_matmul_basename = f"/model/layers.{layer_id}/self_attn/k_proj/MatMul"
             k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
             self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
-            v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+            v_matmul_basename = f"/model/layers.{layer_id}/self_attn/v_proj/MatMul"
             v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
             self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
 
@@ -1343,20 +1347,20 @@ class Model:
 
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
             # Combine 3 Adds into 1 packed Add
-            qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+            qkv_add_name = f"/model/layers.{layer_id}/self_attn/qkv_proj/Add"
             self.make_packed_add(attention.q_proj.bias.detach().numpy(), attention.k_proj.bias.detach().numpy(), attention.v_proj.bias.detach().numpy(), qkv_add_name, root_input=self.attention_attrs["q_path"])
             self.attention_attrs["q_path"] = f"{qkv_add_name}/output_0"
         else:
             if q_bias_exists:
-                q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
+                q_add_name = f"/model/layers.{layer_id}/self_attn/q_proj/Add"
                 self.make_add_bias(attention.q_proj.bias.detach().numpy(), q_add_name, root_input=self.attention_attrs["q_path"])
                 self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
             if k_bias_exists:
-                k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
+                k_add_name = f"/model/layers.{layer_id}/self_attn/k_proj/Add"
                 self.make_add_bias(attention.k_proj.bias.detach().numpy(), k_add_name, root_input=self.attention_attrs["k_path"])
                 self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
             if v_bias_exists:
-                v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
+                v_add_name = f"/model/layers.{layer_id}/self_attn/v_proj/Add"
                 self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=self.attention_attrs["v_path"])
                 self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
@@ -1365,10 +1369,10 @@ class Model:
         if self.attention_attrs["use_rotemb_in_attn"]:
             cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
         else:
-            q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
+            q_rotary_name = f"/model/layers.{layer_id}/self_attn/q_rotary/RotaryEmbedding"
             self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
             self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
-            k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
+            k_rotary_name = f"/model/layers.{layer_id}/self_attn/k_rotary/RotaryEmbedding"
             self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
             self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
@@ -1383,7 +1387,7 @@ class Model:
             past_k, past_v, present_k, present_v = "", "", "", ""
 
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
-        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
+        attn_name = f"/model/layers.{layer_id}/self_attn/{self.attention_attrs['op_type']}"
         self.make_attention_op(
             attn_name, q_path=self.attention_attrs["q_path"], k_path=self.attention_attrs["k_path"], v_path=self.attention_attrs["v_path"],
             past_k=past_k, past_v=past_v, present_k=present_k, present_v=present_v,
@@ -1392,14 +1396,14 @@ class Model:
 
         # Make MatMul node (output projection weight node)
         o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
-        o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
+        o_matmul_basename = f"/model/layers.{layer_id}/self_attn/o_proj/MatMul"
         o_weight = eval(f"attention.{o_proj}")
         o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
         if o_bias_exists:
-            o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
+            o_add_name = f"/model/layers.{layer_id}/self_attn/o_proj/Add"
             o_bias = eval(f"attention.{o_proj}.bias.detach().numpy()")
             self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
 
@@ -1705,7 +1709,7 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    def make_model(self, input_path):
+    def make_model(self, input_path, adapter_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
 
@@ -1730,15 +1734,16 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size)
-        elif os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path):
-            # Load LoRA PyTorch model
-            from peft import AutoPeftModelForCausalLM
-            extra_kwargs = {} if os.path.exists(input_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
-            model = AutoPeftModelForCausalLM.from_pretrained(input_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
         else:
             # Load PyTorch model
             extra_kwargs = {} if os.path.exists(self.model_name_or_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
             model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
+
+        # Load adapter weights
+        if os.path.isdir(adapter_path) and "adapter_config.json" in os.listdir(adapter_path):
+            from peft import PeftModel
+            extra_kwargs = {} if os.path.exists(adapter_path) else {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {"cache_dir": self.cache_dir}
+            model = PeftModel.from_pretrained(model, adapter_path)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
@@ -2584,7 +2589,7 @@ def parse_extra_options(kv_items):
     return kv_pairs
 
 
-def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+def create_model(model_name, input_path, adapter_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -2593,13 +2598,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
 
-    is_peft = os.path.isdir(input_path) and "adapter_config.json" in os.listdir(input_path)
+    is_peft = os.path.isdir(adapter_path) and "adapter_config.json" in os.listdir(adapter_path)
+    peft_model_name = adapter_path if is_peft else None
     peft_config = None
     if is_peft:
         from peft import PeftConfig
-        peft_config = PeftConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
-        hf_name = peft_config.base_model_name_or_path
-
+        peft_config = PeftConfig.from_pretrained(peft_model_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
     config = AutoConfig.from_pretrained(hf_name, use_auth_token=True, trust_remote_code=True, **extra_kwargs)
     if is_peft:
         config.update(peft_config.__dict__)
@@ -2635,7 +2639,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
         # Make ONNX model
-        onnx_model.make_model(input_path)
+        onnx_model.make_model(input_path, adapter_path)
 
         # Save ONNX model
         onnx_model.save_model(output_dir)
@@ -2670,6 +2674,15 @@ def get_args():
                 hf_path: Path to folder on disk containing the Hugging Face config, model, tokenizer, etc.
                 gguf_path: Path to float16/float32 GGUF file on disk containing the GGUF model
             """),
+    )
+
+    parser.add_argument(
+        "-a",
+        "--adapter_path",
+        required=False,
+        default="",
+        help=textwrap.dedent("""\
+            Adapter model source."""),
     )
 
     parser.add_argument(
@@ -2742,4 +2755,4 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
+    create_model(args.model_name, args.input, args.adapter_path, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
